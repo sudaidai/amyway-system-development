@@ -1,0 +1,18 @@
+spring:
+  datasource:
+    url: ${DB_URL:jdbc:mysql://localhost:3306/lucky_draw?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true}
+    username: ${DB_USERNAME:lucky_draw}
+    password: ${DB_PASSWORD:lucky_draw}
+    hikari:
+      minimum-idle: ${DB_POOL_MIN_IDLE:2}
+      maximum-pool-size: ${DB_POOL_MAX_SIZE:20}
+      connection-timeout: ${DB_CONNECTION_TIMEOUT_MS:30000}
+  jpa:
+    hibernate.ddl-auto: ${DB_DDL_AUTO:update}
+    open-in-view: false
+app:
+  security:
+    jwt-secret: ${JWT_SECRET:local-development-secret-change-me-1234567890}
+    jwt-ttl: ${JWT_TTL:PT1H}
+server:
+  port: ${PORT:8080}

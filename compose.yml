@@ -1,0 +1,25 @@
+services:
+  db:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: lucky_draw
+      MYSQL_USER: lucky_draw
+      MYSQL_PASSWORD: lucky_draw
+      MYSQL_ROOT_PASSWORD: local-root-only
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-ulucky_draw", "-plucky_draw"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  api:
+    build: .
+    ports: ["8080:8080"]
+    environment:
+      DB_URL: jdbc:mysql://db:3306/lucky_draw?useSSL=false&allowPublicKeyRetrieval=true
+      DB_USERNAME: lucky_draw
+      DB_PASSWORD: lucky_draw
+      JWT_SECRET: replace-this-with-a-long-random-production-secret
+      DB_DDL_AUTO: update
+    depends_on:
+      db:
+        condition: service_healthy

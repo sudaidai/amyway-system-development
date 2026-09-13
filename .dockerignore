@@ -1,0 +1,10 @@
+.git/
+.idea/
+.agents/
+.specify/
+target/
+**/target/
+*.log*
+.env*
+coverage/
+specs/

@@ -1,0 +1,85 @@
+Project lucky_draw {
+  database_type: "MySQL"
+  Note: "Lucky Draw schema derived from the current JPA entities"
+}
+
+Enum campaign_status {
+  ACTIVE
+  INACTIVE
+}
+
+Enum draw_outcome {
+  WIN
+  NO_PRIZE
+}
+
+Table lucky_draw_campaigns {
+  id bigint [pk, increment]
+  name varchar(255) [not null]
+  max_draw_per_user int [not null, note: "Must be greater than zero"]
+  status campaign_status [not null]
+  no_prize_probability decimal(7,4) [not null, note: "Percentage; validated to 0.01% resolution"]
+  start_time datetime(6)
+  end_time datetime(6)
+  created_at datetime(6) [not null]
+  updated_at datetime(6) [not null]
+
+  Note: "Prize probabilities plus no_prize_probability must equal exactly 100.00%. If both times are present, end_time must be later than start_time."
+}
+
+Table prizes {
+  id bigint [pk, increment]
+  campaign_id bigint [not null]
+  name varchar(255) [not null]
+  total_quantity int [not null, note: "Must be zero or greater"]
+  remaining_quantity int [not null, note: "Must remain between zero and total_quantity"]
+  probability decimal(7,4) [not null, note: "Percentage; validated to 0.01% resolution"]
+  version bigint [not null, default: 0, note: "JPA optimistic-lock version"]
+  created_at datetime(6) [not null]
+  updated_at datetime(6) [not null]
+
+  indexes {
+    campaign_id [name: "idx_prize_campaign"]
+  }
+
+  Note: "Inventory is reserved atomically: remaining_quantity = remaining_quantity - 1 and version = version + 1 WHERE remaining_quantity > 0. Regular JPA updates use version for optimistic-lock conflict detection."
+}
+
+Table user_campaign_draw {
+  id bigint [pk, increment]
+  user_id varchar(255) [not null]
+  campaign_id bigint [not null]
+  draw_count int [not null, default: 0, note: "Must not exceed lucky_draw_campaigns.max_draw_per_user"]
+  version bigint [not null, default: 0, note: "JPA optimistic-lock version"]
+
+  indexes {
+    (user_id, campaign_id) [unique, name: "uk_user_campaign"]
+    (user_id, campaign_id) [name: "idx_user_campaign"]
+  }
+
+  Note: "The row is locked with SELECT FOR UPDATE while consuming a user's draw allowance."
+}
+
+Table draw_records {
+  id bigint [pk, increment]
+  user_id varchar(255) [not null]
+  campaign_id bigint [not null]
+  request_id varchar(80) [not null, note: "Client-provided idempotency identifier"]
+  draw_index int [not null, note: "Zero-based position within a multi-draw request"]
+  prize_id bigint [note: "Null when result is NO_PRIZE"]
+  prize_name varchar(255) [note: "Prize-name snapshot; null for NO_PRIZE"]
+  result draw_outcome [not null]
+  created_at datetime(6) [not null]
+
+  indexes {
+    (user_id, campaign_id, request_id, draw_index) [unique, name: "uk_draw_request_index"]
+    (user_id, campaign_id) [name: "idx_draw_user_campaign"]
+  }
+
+  Note: "The unique request key prevents a retried draw from creating a second result or consuming inventory twice."
+}
+
+Ref: prizes.campaign_id > lucky_draw_campaigns.id
+Ref: user_campaign_draw.campaign_id > lucky_draw_campaigns.id
+Ref: draw_records.campaign_id > lucky_draw_campaigns.id
+Ref: draw_records.prize_id > prizes.id

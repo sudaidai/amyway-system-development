@@ -1,0 +1,145 @@
+@startuml
+title Lucky Draw — Complete Draw Flow
+
+skinparam backgroundColor #FFFFFF
+skinparam sequenceMessageAlign center
+skinparam responseMessageBelowArrow true
+skinparam ParticipantPadding 20
+skinparam BoxPadding 10
+skinparam ArrowColor #374151
+skinparam LifeLineBorderColor #6B7280
+skinparam ParticipantBorderColor #374151
+skinparam ParticipantBackgroundColor #F9FAFB
+skinparam NoteBackgroundColor #FFF7D6
+skinparam NoteBorderColor #D6A700
+
+actor User
+participant "JWT Filter" as JWT
+participant "DrawController" as Controller
+participant "MultiDrawService" as Multi
+participant "SingleDrawExecutor" as Draw
+database "Campaign" as CampaignDB
+database "User Draw Counter" as CounterDB
+database "Prize Inventory" as PrizeDB
+participant "PrizeSelector\n(10,000 buckets)" as Selector
+database "DrawRecord" as RecordDB
+
+User -> JWT: POST /api/v1/campaigns/{id}/draws\nBearer token + requestId + count
+
+alt Token missing, invalid, or expired
+  JWT --> User: 401 UNAUTHORIZED
+else Authenticated
+  JWT -> Controller: AuthenticatedPrincipal(userId, roles)
+
+  alt Role is not USER or ADMIN
+    Controller --> User: 403 FORBIDDEN
+  else Authorized
+    Controller -> Controller: Validate campaignId, requestId, count
+
+    alt Request validation fails
+      Controller --> User: 400 standard error response
+    else Request is valid
+      Controller -> Multi: draw(userId, campaignId, request)
+
+      loop drawIndex = 0 to count - 1
+        Multi -> Draw: drawOnce(userId, campaignId, requestId, drawIndex)
+        activate Draw
+        note right of Draw
+          A new REQUIRES_NEW transaction is used
+          for every individual draw.
+        end note
+
+        Draw -> RecordDB: Find existing result by\nuser + campaign + request + index
+        alt Result already exists
+          RecordDB --> Draw: Existing DrawRecord
+          Draw --> Multi: Return the same result\n(no counter or inventory change)
+        else New draw
+          Draw -> CampaignDB: Load campaign
+          alt Campaign does not exist
+            CampaignDB --> Draw: Not found
+            Draw --> Multi: CAMPAIGN_NOT_FOUND\n(transaction rollback)
+          else Campaign exists
+            CampaignDB --> Draw: Campaign configuration
+            Draw -> Draw: Validate ACTIVE status and time window
+
+            alt Campaign unavailable
+              Draw --> Multi: CAMPAIGN_NOT_AVAILABLE\n(transaction rollback)
+            else Campaign available
+              Draw -> CounterDB: INSERT IGNORE counter if missing
+              Draw -> CounterDB: SELECT ... FOR UPDATE\n(user + campaign)
+              note right of CounterDB
+                The pessimistic row lock serializes draws
+                for the same user and campaign.
+              end note
+
+              Draw -> RecordDB: Recheck idempotency after acquiring lock
+              alt Concurrent retry already committed
+                RecordDB --> Draw: Existing DrawRecord
+                Draw --> Multi: Return the committed result\n(no counter or inventory change)
+              else Still a new draw
+                Draw -> Draw: Verify drawCount < maxDrawPerUser
+
+                alt Draw limit reached
+                  Draw --> Multi: DRAW_LIMIT_EXCEEDED\n(transaction rollback)
+                  Multi -> Multi: Stop remaining draws
+                else Draw allowed
+                  Draw -> CounterDB: Increment drawCount
+                  Draw -> PrizeDB: Load campaign prizes
+                  Draw -> Draw: Validate quantities and\nprobability total = 100.00%
+
+                  alt Configuration invalid
+                    Draw --> Multi: INVALID_PROBABILITY_CONFIGURATION\n(transaction rollback, including drawCount)
+                  else Configuration valid
+                    loop At most 3 selection attempts
+                      Draw -> Selector: Generate integer 0..9999\nand select probability bucket
+
+                      alt No Prize bucket selected
+                        Selector --> Draw: NO_PRIZE
+                        Draw -> Draw: Stop retry loop
+                      else Prize selected
+                        Selector --> Draw: Selected prize
+                        Draw -> PrizeDB: Atomic conditional update\nremaining = remaining - 1\nWHERE remaining > 0
+
+                        alt Updated rows = 1
+                          PrizeDB --> Draw: Inventory reserved
+                          Draw -> Draw: Result = WIN
+                          Draw -> Draw: Stop retry loop
+                        else Updated rows = 0
+                          PrizeDB --> Draw: Prize exhausted
+                          Draw -> Draw: Retry selection if attempts remain
+                        end
+                      end
+                    end
+
+                    alt No prize acquired after loop
+                      Draw -> Draw: Result = NO_PRIZE
+                    end
+
+                    Draw -> RecordDB: Save WIN or NO_PRIZE record
+                    RecordDB --> Draw: Persisted DrawRecord
+                    Draw -> Draw: Commit transaction
+                    Draw --> Multi: DrawResult
+                  end
+                end
+              end
+            end
+          end
+        end
+        deactivate Draw
+      end
+
+      Multi --> Controller: Successful results + optional stoppedReason
+      Controller --> User: 200 DrawResponse
+    end
+  end
+end
+
+note over PrizeDB, RecordDB
+  Inventory decrement, draw counter increment, and DrawRecord creation
+  are committed or rolled back together in the same database transaction.
+
+  The current project records prize allocation only.
+  External coupon delivery or physical fulfillment is outside this flow.
+end note
+
+@enduml
